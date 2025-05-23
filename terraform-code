@@ -1,0 +1,117 @@
+provider "aws" {
+  region = "eu-north-1"
+}
+
+# S3 Bucket
+resource "aws_s3_bucket" "resume_bucket" {
+  bucket = "resume-screening-sudheer"
+  force_destroy = true
+}
+
+# Folders in the bucket
+resource "aws_s3_object" "resumes_folder" {
+  bucket = aws_s3_bucket.resume_bucket.bucket
+  key    = "resumes/"
+  source = "empty.txt"
+  etag   = filemd5("empty.txt")
+}
+
+resource "aws_s3_object" "result_folder" {
+  bucket = aws_s3_bucket.resume_bucket.bucket
+  key    = "result/"
+  source = "empty.txt"
+  etag   = filemd5("empty.txt")
+}
+
+resource "aws_s3_object" "spacy_folder" {
+  bucket = aws_s3_bucket.resume_bucket.bucket
+  key    = "spacy/"
+  source = "empty.txt"
+  etag   = filemd5("empty.txt")
+}
+
+# IAM Role for Lambda
+resource "aws_iam_role" "lambda_exec_role" {
+  name = "lambda-resume-exec-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action = "sts:AssumeRole"
+      Effect = "Allow"
+      Principal = {
+        Service = "lambda.amazonaws.com"
+      }
+    }]
+  })
+}
+
+# IAM Policy for Lambda to access S3
+resource "aws_iam_policy" "lambda_s3_policy" {
+  name = "LambdaS3Policy"
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:ListBucket"
+        ]
+        Effect   = "Allow"
+        Resource = [
+          "arn:aws:s3:::${aws_s3_bucket.resume_bucket.id}",
+          "arn:aws:s3:::${aws_s3_bucket.resume_bucket.id}/*"
+        ]
+      },
+      {
+        Action = [
+          "logs:CreateLogGroup",
+          "logs:CreateLogStream",
+          "logs:PutLogEvents"
+        ]
+        Effect = "Allow"
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+# Attach policy to role
+resource "aws_iam_role_policy_attachment" "lambda_policy_attach" {
+  role       = aws_iam_role.lambda_exec_role.name
+  policy_arn = aws_iam_policy.lambda_s3_policy.arn
+}
+
+# Lambda Function
+resource "aws_lambda_function" "resume_processor" {
+  function_name = "ResumeProcessor"
+  s3_bucket     = aws_s3_bucket.resume_bucket.bucket
+  s3_key        = "spacy/lambda.zip"
+  handler       = "main.lambda_handler"
+  runtime       = "python3.12"
+  role          = aws_iam_role.lambda_exec_role.arn
+  timeout       = 30
+  depends_on    = [aws_iam_role_policy_attachment.lambda_policy_attach]
+}
+
+# S3 Event Notification (trigger Lambda when file is uploaded to 'resumes/')
+resource "aws_s3_bucket_notification" "resume_upload_trigger" {
+  bucket = aws_s3_bucket.resume_bucket.id
+
+  lambda_function {
+    lambda_function_arn = aws_lambda_function.resume_processor.arn
+    events              = ["s3:ObjectCreated:*"]
+    filter_prefix       = "resumes/"
+  }
+
+  depends_on = [aws_lambda_permission.allow_s3]
+}
+
+# Allow S3 to invoke Lambda
+resource "aws_lambda_permission" "allow_s3" {
+  statement_id  = "AllowS3Invoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.resume_processor.function_name
+  principal     = "s3.amazonaws.com"
+  source_arn    = aws_s3_bucket.resume_bucket.arn
+}
